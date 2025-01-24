@@ -7,7 +7,6 @@ from inspect_ai.solver import (
 
 DEFAULT_PROMPT="{prompt}"
 
-
 from tree_of_thought import TREE_PROMPT, generate_tree
 
 @solver 

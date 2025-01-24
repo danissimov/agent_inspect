@@ -29,25 +29,33 @@ def check_file_exists():
     return score
 
 
-@scorer(metrics=[accuracy()])
+@scorer(metrics=[accuracy(), stderr()])
 def check_nested_dirs():
-    """numerical scoring function"""
+    """numerical scoring function 0 to 3"""
     async def score(state: TaskState, target: Target):
         score = 0 
         try:
             output = await sandbox().exec('ls -R')
-            print(f"The dir structure:\n\n{output}")
+            print(f"The dir structure:\n\n{output.stdout.strip()}")
+            
             count = await sandbox().exec('find . | wc -l')
             #check max depth 
-            if int(count) == int(target.text)*(int(target.text)+1):
-              score += 0.5
-            #count all elements 
+            if int(count.stdout.strip()) == int(target.text)*(int(target.text)+1):
+              score += 1
+            # count all elements 
             nestedness = await sandbox().exec("find . -type d | awk -F/ '{print NF-1}' | sort -n | tail -1")
-            if int(nestedness) == int(target.text):
-              score += 0.5
-        except FileNotFoundError:
-            exists = False
-        return Score(value=1 if exists else 0)
+            print(f"The max depth:\n\n{nestedness.stdout.strip()}")
+            if int(nestedness.stdout.strip()) == int(target.text):
+              score += 1
+            # Check the amount of unique names in the directory
+            unique_names_count = await sandbox().exec("find . -type d -printf '%f\n' | sort | uniq | wc -l")
+            print(f"The number of unique directory names:\n\n{unique_names_count.stdout.strip()}")
+            if int(unique_names_count.stdout.strip()) == int(target.text)*(int(target.text)+1):
+              score += 1
+        except Exception as e:
+            print(f"Error scoring {e}")
+            Score(value=0)    
+        return Score(value=score, answer="", explanation=output.stdout.strip() )
 
     return score
 
@@ -203,21 +211,24 @@ def nested_dirs_challenge(depth_n: int = 5) -> Task:
         ],
         
         solver=agent,
-        sandbox="local",
+        sandbox="docker",
         
         # 1 - simple model qa
         # scorer=model_graded_qa(),
         
         # 2 model qa - fix input (ls -R)
-        scorer = custom_model_graded_qa(model="openai/gpt-4o")
+        # scorer = custom_model_graded_qa(model="openai/gpt-4o")
         
-        # 3 multiple scorers possible
+        # 3 numerical scorer
+        scorer = check_nested_dirs()
+        
+        # 4 multiple scorers possible
         # scorer=[
         # model_graded_qa(model="openai/gpt-4"), 
         # model_graded_qa(model="google/gemini-1.5-pro")
         #        ],
     )
     
-eval(nested_dirs_challenge(depth_n=5),
+eval(nested_dirs_challenge(depth_n=1),
      model="openai/gpt-4o-mini",
      )
