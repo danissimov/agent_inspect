@@ -6,7 +6,16 @@ from inspect_ai.scorer._model import DEFAULT_MODEL_GRADED_QA_TEMPLATE, DEFAULT_G
 from inspect_ai.solver import Plan, TaskState, generate, use_tools, basic_agent, solver
 from inspect_ai.tool import bash, tool
 from inspect_ai.util import sandbox
-from inspect_ai.model._model import Model, get_model
+from inspect_ai.model._model import Model, get_model, GenerateConfig
+
+import re
+import os
+from inspect_ai import eval, Task, task
+from inspect_ai.dataset import Sample
+from inspect_ai.scorer import Score, Target, accuracy, stderr, scorer, model_graded_qa, Scorer, _model, INCORRECT, CORRECT
+from inspect_ai.scorer._model import DEFAULT_MODEL_GRADED_QA_TEMPLATE, DEFAULT_GRADE_PATTERN
+from inspect_ai.solver import Plan, TaskState, generate, use_tools, basic_agent, solver
+from collections import defaultdict
 
 from functools import wraps
 bash_command_count = {}
@@ -26,11 +35,11 @@ def check_nested_dirs():
         
         try:
             # Extract the target value (n) from the target text
-            target_match = re.search(r'Target input: (\d+)', target.text)
+            target_match = target.text
             if not target_match:
                 return Score(value=0, answer="Failed to extract target value from description")
             
-            n = int(target_match.group(1))
+            n = int(target_match)
             print(f"[Sample {sample_id}] Extracted target value n = {n}")
             
             # Safe execution function to handle both string and list formats
@@ -167,44 +176,276 @@ def check_nested_dirs():
     return score
 
 
-def parse_component_scores(explanation_text):
+
+@scorer(metrics=[accuracy(), stderr()])
+def check_nested_dirs_py():
     """
-    As it appears to be pretty hard to extract separate,
-    it makes sense to parse component scores 
-    from explanation text in the format:
-    "Depth: ✓, Breadth: ✗, Uniqueness: ✓"
-    
-    Returns a dictionary with binary scores for each component
+    Score directory structure based on depth, breadth, and uniqueness within /directory_task.
+    Optimized: Runs ls -R directly on /directory_task and parses the output.
     """
-    if not explanation_text or "," not in explanation_text:
-        return {
-            "depth_score": 0,
-            "breadth_score": 0, 
-            "uniqueness_score": 0
-        }
-    
-    try:
-        components = [comp.strip() for comp in explanation_text.split(",")]
-        results = {}
+    async def score(state: TaskState, target: Target) -> Score:
+        total_score = 0
+        max_score = 3
+        sample_id = str(id(state))[-8:]
         
-        if components[0].startswith("Depth:"):
-            results["depth_score"] = 1 if "✓" in components[0] else 0
-        
-        if len(components) > 1 and components[1].startswith("Breadth:"):
-            results["breadth_score"] = 1 if "✓" in components[1] else 0
-        
-        if len(components) > 2 and components[2].startswith("Uniqueness:"):
-            results["uniqueness_score"] = 1 if "✓" in components[2] else 0
-            
-        return results
-        
-    except Exception as e:
-        print(f"Error parsing component scores: {e}")
-        return {
-            "depth_score": 0,
-            "breadth_score": 0, 
-            "uniqueness_score": 0
-        }
+        # Using /directory_task based on latest logs provided by user
+        target_base_dir = "/directory_task"
+
+        # Keep: Initial marker for the scorer run
+        print(f"\n===== Scoring Sample {sample_id} (Python Scorer: ls -R on {target_base_dir}) =====")
+
+        try:
+            # --- Extract Target Value ---
+            try:
+                n = int(target.text)
+                if n < 0:
+                     raise ValueError("Target 'n' cannot be negative.")
+            except ValueError as e:
+                print(f"[Py Scorer {sample_id}] Error: Invalid target value '{target.text}'. {e}")
+                return Score(value=0, answer=f"Invalid target value n='{target.text}'")
+            print(f"[Py Scorer {sample_id}] Extracted target value n = {n}")
+            expected_depth = n
+
+            # --- Safe Execution Function ---
+            async def safe_exec(cmd_list, log_stdout=False):
+                # print(f"[Py Scorer {sample_id}] Executing: {cmd_list}") # Commented out
+                try:
+                    result = await sandbox().exec(cmd_list)
+                    # print(f"[Py Scorer {sample_id}] RC={result.returncode} STDOUT='{len(result.stdout)} bytes' STDERR='{result.stderr[:100].strip()}'") # Commented out
+                    return result
+                except Exception as e:
+                     print(f"[Py Scorer {sample_id}] Error executing {cmd_list}: {e}")
+                     return sandbox.SandboxExecResult(returncode=-1, stdout="", stderr=str(e), success=False)
+
+            # --- Step 1: Check if target_base_dir exists ---
+            check_base_cmd = ["test", "-d", target_base_dir]
+            base_check_result = await safe_exec(check_base_cmd)
+            if not base_check_result.success:
+                print(f"[Py Scorer {sample_id}] Target base directory '{target_base_dir}' does not exist or is not a directory. RC={base_check_result.returncode}")
+                # ... (scoring logic for base dir not found) ...
+                if n == 0:
+                    return Score(value=1.0, answer="Score: 3/3", explanation=f"[Py Direct {target_base_dir}] n=0, Target base dir not found (correct).", metrics={"depth_score":1, "breadth_score":1, "uniqueness_score":1, "depth_value":0, "expected_depth":0, "num_filtered_dirs":0})
+                else:
+                    return Score(value=0, answer="Score: 0/3", explanation=f"[Py Direct {target_base_dir}] n={n}, Target base dir '{target_base_dir}' not found.", metrics={"depth_score":0, "breadth_score":0, "uniqueness_score":0, "depth_value":-1, "expected_depth":n, "num_filtered_dirs":0})
+
+
+            # --- Step 2: Run ls -Rp directly on target_base_dir ---
+            print(f"[Py Scorer {sample_id}] Running ls -Rp directly on {target_base_dir}...")
+            ls_cmd = ["ls", "-Rp", target_base_dir]
+            ls_result = await safe_exec(ls_cmd)
+
+            if not ls_result.success:
+                # Handle potential errors like permission denied, though unlikely for /directory_task
+                print(f"[Py Scorer {sample_id}] ERROR: 'ls -Rp {target_base_dir}' failed. RC={ls_result.returncode}, Err={ls_result.stderr.strip()}")
+                # If ls fails, we cannot determine the structure
+                return Score(value=0, answer="Score: 0/3", explanation=f"[Py Direct {target_base_dir}] Scorer Error: Failed to list contents of {target_base_dir}.", metrics={"depth_score":0, "breadth_score":0, "uniqueness_score":0, "depth_value":-1, "expected_depth":n, "num_filtered_dirs":0})
+
+            # --- Step 3: Parse ls Output ---
+            print(f"[Py Scorer {sample_id}] Parsing structure from {target_base_dir} ({len(ls_result.stdout)} bytes)...")
+            agent_dirs = set()
+            current_section_dir = None
+            hidden_pattern = re.compile(r'/\.') # Pattern to find '/.' for hidden dirs/files
+
+            lines = ls_result.stdout.splitlines()
+            for line in lines:
+                line = line.strip()
+                if not line: continue
+
+                # Check for directory section headers produced by ls -R
+                # Format is typically './path:' or '/full/path:'
+                # We are interested in sections within target_base_dir
+                if line.endswith(':'):
+                    # Extract the directory path from the section header
+                    potential_section_dir = line[:-1]
+                    # Resolve potential relative paths from ls output if needed (though ls -R usually gives full paths from arg)
+                    if not potential_section_dir.startswith('/'):
+                         # If ls -R output uses relative paths within target_base_dir
+                         current_section_dir = os.path.normpath(os.path.join(target_base_dir, potential_section_dir))
+                    else:
+                         # Assumes ls -R gives paths starting from target_base_dir or root
+                         current_section_dir = potential_section_dir
+
+                    # Validate if the section is within our target base directory
+                    if not current_section_dir.startswith(target_base_dir):
+                        current_section_dir = None # Skip sections outside our target
+                        continue
+
+                    # Check if the section path itself is hidden
+                    relative_path = os.path.relpath(current_section_dir, '/')
+                    if any(part.startswith('.') for part in relative_path.split(os.sep)):
+                         current_section_dir = None # Skip hidden sections
+                    elif current_section_dir:
+                         # Add the directory path itself (if not the base)
+                         if current_section_dir != target_base_dir:
+                            agent_dirs.add(current_section_dir)
+                    continue
+
+                # Process entries listed within a valid section
+                if current_section_dir:
+                    # Check if the line represents a directory (ends with '/' due to -p)
+                    if line.endswith('/'):
+                        entry_name = line[:-1]
+                        # Skip '.' and '..' entries explicitly
+                        if entry_name == '.' or entry_name == '..': continue
+                        # Skip other hidden entries
+                        if entry_name.startswith('.'): continue
+
+                        # Construct the full path
+                        full_path = os.path.join(current_section_dir, entry_name)
+
+                        # Final check if path is within target base and not hidden
+                        if full_path.startswith(target_base_dir):
+                             relative_path = os.path.relpath(full_path, '/')
+                             if not any(part.startswith('.') for part in relative_path.split(os.sep)):
+                                 agent_dirs.add(full_path)
+
+            # We only care about directories strictly inside the base directory
+            filtered_dirs = sorted([d for d in agent_dirs if d != target_base_dir])
+            # print(f"[Py Scorer {sample_id}] Final filtered agent directories within {target_base_dir}: {filtered_dirs}") # Commented out
+
+
+            # --- Step 4: Calculate Metrics (relative to target_base_dir) ---
+            actual_depth = 0
+            depth_correct = False
+            breadth_correct = False
+            uniqueness_passed = False
+            # Base depth calculation needs careful check for '/' vs '/directory_task'
+            base_depth_parts = target_base_dir.strip('/').count('/') + 1
+
+            if not filtered_dirs and n != 0:
+                # print(f"[Py Scorer {sample_id}] No relevant agent directories found after parsing (n={n}).") # Commented out
+                return Score(value=0, answer="Score: 0/3", explanation=f"[Py Direct {target_base_dir}] n={n}, No directories found.", metrics={"depth_score":0, "breadth_score":0, "uniqueness_score":0, "depth_value":0, "expected_depth":n, "num_filtered_dirs":0})
+            elif n == 0 and not filtered_dirs:
+                # print(f"[Py Scorer {sample_id}] n=0 and no directories found after parsing, scoring accordingly.") # Commented out
+                actual_depth = 0
+                depth_correct = True
+                breadth_correct = True
+                uniqueness_passed = True
+            elif filtered_dirs:
+                # --- Paste metric calculation logic here ---
+                dir_details = {}
+                max_relative_depth = 0
+                parent_map = defaultdict(list)
+                all_dir_basenames = []
+
+                for d in filtered_dirs:
+                    relative_depth = d.strip('/').count('/') - base_depth_parts + 1
+                    if relative_depth <= 0: continue
+
+                    max_relative_depth = max(max_relative_depth, relative_depth)
+                    dir_details[d] = {'depth': relative_depth, 'children': []}
+                    all_dir_basenames.append(os.path.basename(d))
+
+                    parent_path = os.path.dirname(d)
+                    if parent_path == target_base_dir or parent_path in dir_details:
+                         parent_map[parent_path].append(os.path.basename(d))
+                         if parent_path != target_base_dir:
+                             dir_details[parent_path]['children'].append(os.path.basename(d))
+
+                actual_depth = max_relative_depth
+                print(f"[Py Scorer {sample_id}] Calculated Max Relative Depth (within {target_base_dir}): {actual_depth} (Expected: {expected_depth})")
+
+                # 1. Check Depth
+                depth_correct = (actual_depth == expected_depth)
+                print(f"[Py Scorer {sample_id}] {'✓' if depth_correct else '✗'} Depth criterion {'met' if depth_correct else 'not met'}")
+
+                # 2. Check Breadth
+                breadth_correct = True
+                if n == 0:
+                     breadth_correct = (actual_depth == 0)
+                elif n > 0 :
+                    top_level_dirs_found = parent_map.get(target_base_dir, [])
+                    if len(top_level_dirs_found) != n:
+                         breadth_correct = False
+                         print(f"[Py Scorer {sample_id}] ✗ Breadth fail: Found {len(top_level_dirs_found)} dirs directly under {target_base_dir} (expected {n}). Dirs: {top_level_dirs_found}")
+                    else:
+                        for d_path, details in dir_details.items():
+                            d_relative_depth = details['depth']
+                            if d_relative_depth > 0 and d_relative_depth < expected_depth:
+                                num_children = len(parent_map.get(d_path, []))
+                                if num_children != n:
+                                    breadth_correct = False
+                                    print(f"[Py Scorer {sample_id}] ✗ Breadth fail: Dir '{d_path}' at relative depth {d_relative_depth} has {num_children} subdirs (expected {n}). Children: {parent_map.get(d_path, [])}")
+                                    break
+                            elif d_relative_depth == expected_depth:
+                                 num_children = len(parent_map.get(d_path, []))
+                                 if num_children != 0:
+                                     breadth_correct = False
+                                     print(f"[Py Scorer {sample_id}] ✗ Breadth fail: Dir '{d_path}' at expected leaf relative depth {d_relative_depth} has {num_children} subdirs (expected 0). Children: {parent_map.get(d_path, [])}")
+                                     break
+                print(f"[Py Scorer {sample_id}] {'✓' if breadth_correct else '✗'} Breadth criterion {'met' if breadth_correct else 'not met'}")
+
+                # 3. Check Uniqueness
+                dir_name_counts = defaultdict(int)
+                for name in all_dir_basenames:
+                    dir_name_counts[name] += 1
+                
+                # Calculate expected number of unique directory names
+                # For n>0: Each level should have n^level directories (1, n, n^2, ..., n^n)
+                # Sum of geometric series: (1-n^(n+1))/(1-n) for n!=1, or n+1 for n=1
+                if n > 1:
+                    expected_unique_names = sum(n**i for i in range(1, expected_depth + 1))
+                elif n == 1:
+                    expected_unique_names = expected_depth
+                else:  # n == 0
+                    expected_unique_names = 0
+                
+                actual_unique_names = len(dir_name_counts)
+                duplicates = {name: count for name, count in dir_name_counts.items() if count > 1}
+                uniqueness_passed = not duplicates and actual_unique_names >= expected_unique_names
+                
+                print(f"[Py Scorer {sample_id}] {'✓' if uniqueness_passed else '✗'} Uniqueness criterion {'met' if uniqueness_passed else 'not met'}" + 
+                      (f". Duplicates: {duplicates}" if not uniqueness_passed else ""))
+                
+                uniquness_explanation = f"Found {actual_unique_names} unique directory names (expected at least {expected_unique_names})"
+                print(uniquness_explanation)
+                # --- End of metric calculation logic ---
+
+
+            # --- Calculate final score ---
+            final_score = 0
+            # ... (scoring logic) ...
+            if depth_correct and (n == 0 or actual_depth >= 0): final_score += 1
+            if breadth_correct and (n == 0 or (actual_depth > 0 if n > 0 else True)): final_score += 1
+            if uniqueness_passed and (n == 0 or actual_depth >= 0): final_score += 1
+
+            if n == 0:
+                 if actual_depth == 0:
+                      final_score = 3
+                      depth_correct = breadth_correct = uniqueness_passed = True
+                 else:
+                      final_score = 0
+                      depth_correct = breadth_correct = uniqueness_passed = False
+
+            normalized_score = round(final_score / max_score, 2)
+
+            # --- Return Score ---
+            return Score(
+                value=normalized_score,
+                answer=f"Score: {final_score}/{max_score}",
+                # Updated explanation prefix
+                explanation=f"[Py Direct {target_base_dir}] Depth: {'✓' if depth_correct else '✗'} ({actual_depth}/{expected_depth}), "
+                           f"Breadth: {'✓' if breadth_correct else '✗'}, "
+                           f"Uniqueness: {'✓' if uniqueness_passed else '✗'}"
+                           f"{uniquness_explanation}"
+                           f"Full structure: {ls_result.stdout}",
+                metrics={
+                    "depth_score": 1 if depth_correct else 0,
+                    "breadth_score": 1 if breadth_correct else 0,
+                    "uniqueness_score": 1 if uniqueness_passed else 0,
+                    "depth_value": actual_depth,
+                    "expected_depth": expected_depth,
+                    "num_filtered_dirs": len(filtered_dirs)
+                }
+            )
+
+        except Exception as e:
+            print(f"[Py Scorer {sample_id}] Error scoring: {e}")
+            import traceback
+            traceback.print_exc()
+            return Score(value=0, answer="Scoring Error", explanation=f"An internal error occurred: {str(e)}")
+
+    return score
 
 
 def agent_prompt(n: int, prompt_version: int = 1):
@@ -212,33 +453,33 @@ def agent_prompt(n: int, prompt_version: int = 1):
                     1. The structure should have a TOTAL DEPTH of exactly {n} (counting from the root as 0)
                     2. At each level, each directory should have exactly {n} subdirectories
                     3. All directory names must be unique
-                    
+                    4. The root directory should be named 'directory_task'
                     EXAMPLES:
                     
                     For n=1:
                     - Create 1 directory at depth 1 (one level below root)
                     - Example structure:
-                    root/
-                        └── dir1/
+                    root/directory_task/
+                            └── directory_1/
                     
                     For n=2:
                     - Create 2 directories at depth 1, each with 2 subdirectories at depth 2
                     - Example structure:
-                    root/
-                        ├── dir1/
-                        │   ├── subdir1a/
-                        │   └── subdir1b/
-                        └── dir2/
-                            ├── subdir2a/
-                            └── subdir2b/
+                    root/directory_task/
+                            ├── directory_1/
+                            │   ├── subdirectory_1/
+                            │   └── subdirectory_2/
+                            └── directory_2/
+                                ├── subdirectory_3/
+                                └── subdirectory_4/
                     
                     EXAMPLE BASH COMMAND:
                     ```
                     mkdir -p a/b a/c d/e d/f
                     ```
-                    When you have finished, submit the string 'submit'.""")
+                    IMPORTANT: When you have finished creating directories, submit the string 'submit' to apply results for an evaluation.""")
                     
-    COT_mpromt = (f"""IMPORTANT: After creating the directories, verify your work by running 'ls -R' command 
+    COT_mpromt = ("""IMPORTANT: After creating the directories, verify your work by running 'ls -R' command 
                   and resolve any issues if needed.
                     
                     VERIFICATION STEPS:
@@ -257,180 +498,13 @@ def agent_prompt(n: int, prompt_version: int = 1):
     elif prompt_version == 2:
         return base_prompt + COT_mpromt
 
-def build_sample_model_graded(n: int, prompt_version: int = 1):
-  return Sample(
-                input=agent_prompt(n, prompt_version=prompt_version),
-                  
-                target=f"""Solution for the input n must follow these conditions:
-                
-                - Depth: Maximum depth equals n.
-                - Subdirectory Count: Non-leaf directories have exactly n subdirectories.
-                - Uniqueness: All directory names are unique.
-                - Leaf Directories: Directories at depth n are empty.
-                
-                Target input: {n}""",
+def build_sample_model_graded(n: int, prompt_version: int = 1) -> Sample:
+    _id = f'{prompt_version}, {n}'
+    return Sample(
+                input=agent_prompt(n, prompt_version=prompt_version), 
+                target=str(n),
+                id=_id,
             )
-                  
-
-@scorer(metrics=[accuracy(), stderr()])
-def command_efficiency_scorer():
-    """Score based on the number and efficiency of bash commands used"""
-    async def score(state: TaskState, target: Target):
-        sample_id = str(id(state))[-8:]
-        
-        try:
-            print(f"[Sample {sample_id}] Analyzing command efficiency...")
-            
-            # Safe execution function to handle both string and list formats
-            async def safe_exec(cmd):
-                try:
-                    # Try string format first (for local sandbox)
-                    return await sandbox().exec(cmd)
-                except TypeError:
-                    # If that fails, try list format (for Docker sandbox)
-                    if isinstance(cmd, str):
-                        # For shell commands with pipes/redirects, we need to use sh -c
-                        if any(c in cmd for c in '|&><;'):
-                            return await sandbox().exec(['sh', '-c', cmd])
-                        # For simple commands, we can just split
-                        else:
-                            return await sandbox().exec(cmd.split())
-                    else:
-                        # Already a list
-                        return await sandbox().exec(cmd)
-            
-            # Extract bash commands with the same approach as before...
-            bash_commands = []
-            
-            # Check if we have access to the execution steps
-            has_execution = False
-            tool_calls = []
-            
-            # Method 1: Try to access execution steps directly
-            if hasattr(state, 'execution') and state.execution:
-                has_execution = True
-                print(f"[Sample {sample_id}] Found execution steps")
-                
-                for step in state.execution:
-                    if hasattr(step, 'tool') and step.tool == "bash":
-                        if hasattr(step, 'args') and isinstance(step.args, dict) and 'cmd' in step.args:
-                            cmd = step.args['cmd']
-                            if cmd:
-                                bash_commands.append(cmd)
-                                print(f"[Sample {sample_id}] Found bash command in execution: {cmd}")
-            
-            # Method 2: Try to access tool calls as an alternative
-            elif hasattr(state, 'tool_calls') and state.tool_calls:
-                has_execution = True
-                print(f"[Sample {sample_id}] Found tool calls")
-                
-                for call in state.tool_calls:
-                    if hasattr(call, 'name') and call.name == "bash":
-                        if hasattr(call, 'args') and isinstance(call.args, dict) and 'cmd' in call.args:
-                            cmd = call.args['cmd']
-                    if cmd:
-                        bash_commands.append(cmd)
-                        print(f"[Sample {sample_id}] Found bash command in tool call: {cmd}")
-            
-            # Method 3: Extract from model output as last resort
-            if not has_execution and hasattr(state, 'output') and state.output and hasattr(state.output, 'completion'):
-                completion = state.output.completion
-                print(f"[Sample {sample_id}] No execution data, extracting from text...")
-                
-                # Debug: Print part of the completion
-                debug_excerpt = completion[:200].replace('\n', '\\n')
-                print(f"[Sample {sample_id}] Model output excerpt: {debug_excerpt}...")
-                
-                # Patterns to look for bash commands
-                patterns = [
-                    # Code blocks with bash/shell
-                    r'```(?:bash|shell)?\n(.*?)```',
-                    
-                    # Lines starting with $ or >
-                    r'(?:^|\n)\s*[$>]\s*([^\n]+)',
-                    
-                    # Inline code with mkdir/touch/cd/etc
-                    r'`([^`]+?(?:mkdir|touch|cd|find|ls|rm|cp|mv)[^`]*?)`',
-                    
-                    # Common commands at line start (no markup)
-                    r'(?:^|\n)(?:sudo\s+)?(mkdir|touch|cd|find|ls|rm|cp|mv)\s+[^\n]+'
-                ]
-                
-                for pattern in patterns:
-                    matches = re.findall(pattern, completion, re.DOTALL)
-                    for match in matches:
-                        if isinstance(match, tuple):
-                            match = ' '.join(match).strip()
-                        else:
-                            match = match.strip()
-                            
-                        if match and not match.startswith('#'):
-                            bash_commands.append(match)
-                            print(f"[Sample {sample_id}] Found command via regex: {match}")
-            
-            # Print summary
-            if bash_commands:
-                print(f"[Sample {sample_id}] Total commands found: {len(bash_commands)}")
-                for i, cmd in enumerate(bash_commands):
-                    print(f"[Sample {sample_id}] Command {i+1}: {cmd}")
-            else:
-                print(f"[Sample {sample_id}] No commands found in the model's output")
-            
-            # Filter out verification commands
-            verification_commands = ["ls", "pwd", "echo", "cat"]
-            meaningful_commands = []
-            
-            for cmd in bash_commands:
-                cmd_parts = cmd.split()
-                if not cmd_parts:
-                    continue
-                    
-                # Check if the command starts with a verification command
-                is_verification = False
-                for vcmd in verification_commands:
-                    if cmd_parts[0] == vcmd or cmd.startswith(vcmd + " "):
-                        is_verification = True
-                        break
-                
-                if not is_verification:
-                    meaningful_commands.append(cmd)
-            
-            command_count = len(meaningful_commands)
-            print(f"[Sample {sample_id}] Meaningful commands: {command_count}")
-            
-            # Score based on efficiency criteria
-            if command_count == 0:
-                efficiency_score = 0.0
-                explanation = "No meaningful commands detected"
-            elif command_count == 1 and "mkdir -p" in meaningful_commands[0]:
-                efficiency_score = 1.0
-                explanation = "Optimal solution: single mkdir -p command"
-            elif command_count == 1:
-                efficiency_score = 0.8
-                explanation = "Good solution: single command"
-            else:
-                # Decrease score as commands increase, but never below 0.2
-                efficiency_score = max(0.2, 1.0 - (command_count - 1) * 0.1)
-                explanation = f"Used {command_count} commands (optimal is 1)"
-            
-            return Score(
-                value=efficiency_score,
-                answer=f"Used {command_count} meaningful commands",
-                explanation=explanation,
-                metrics={
-                    "command_count": command_count,
-                    "meaningful_commands": meaningful_commands
-                }
-            )
-            
-        except Exception as e:
-            print(f"[Sample {sample_id}] Command scoring error: {e}")
-            import traceback
-            traceback.print_exc()
-            return Score(value=0, answer=f"Error: {str(e)}")
-    
-    return score
-
 
 
 #Create simple agent 
@@ -440,78 +514,101 @@ agent = basic_agent(tools=[bash()])
 def nested_dirs_challenge(depth_n: int = 2) -> Task:
     return Task(
         dataset=[
-            build_sample_model_graded(i+1) for i in range(depth_n)
+            build_sample_model_graded(i+1, prompt_version=1) for i in range(depth_n) # Using prompt_version 1
         ],
-        #solver=directory_verification_agent(),  # Use our properly registered custom agent
-        solver=agent,
-        sandbox="local",
-        
-        # 1 - simple model qa
-        # scorer=model_graded_qa(),
-        
-        # 2 model qa - fix input (ls -R)
-        # scorer = custom_model_graded_qa(model="openai/gpt-4o")
-        
-        # 3 - double scorer 
-        # scorer = [check_nested_dirs(),
-        #           command_efficiency_scorer()
-        #           ],
-        
-        # 4 - double scorer 
-        scorer = check_nested_dirs(),
-                  
+        solver=agent, # Use the basic_agent
+        # solver=human_cli()) # or human cli forchecking the command hanging
+        sandbox="docker", # Explicitly set to docker for testing the py scorer
+        # Use both scorers:
+        scorer = [
+            # check_nested_dirs(), # Original shell-based scorer
+            check_nested_dirs_py() # New Python ls-R based scorer
+        ],
         debug=True,
-        time_limit=300,  # 5 minutes per sample
-        fail_on_error=0.5 
-        # # Add a token limit to prevent excessive generation
-        # token_limit=4000
+        time_limit=1000,
+        fail_on_error=0.5,
+        config=GenerateConfig(temperature=0.5),
     )
 
 
 if __name__ == "__main__":
+    models = ["openai/gpt-4o-mini", "openai/gpt-4o"] 
+    # "anthropic/claude-3-5-haiku-20241022", "anthropic/claude-3-5-sonnet-20241022", "anthropic/claude-3-7-sonnet-20250219", 
+    # "google/gemini-1.5-flash", "google/gemini-1.5-pro", "google/gemini-2.5-pro-exp-03-25"
+    # https://docs.google.com/document/d/1f_6-qGauLPUNLPC2K7tKv18vZ3J7jaNgOfSSW3zxPpI/edit?tab=t.0
+    # Ensure the task definition uses sandbox="docker" if you want to test the py scorer reliably
+    log = eval(nested_dirs_challenge(depth_n=10), # Using depth_n=2 for testing
+        model=models,
+        sandbox="docker", # Override sandbox setting if needed
+        epochs = 1,
+        )
     
-    # # Run a single evaluation (for testing)
-    log = eval(nested_dirs_challenge(depth_n=5),
-             model="openai/gpt-4o",  
-             epochs = 10, 
-             name = "Manual test" ,
-             version = "v1",
-         metadata={
-                "run_info": """
-                        Single test run. 
-                    Model: gpt-4o-mini
-                    Task: nested_dirs_challenge
-                        Prompt: default
-                    Score: numeric 0-3, based on bash commands results
-                        """
-             }
-    )
+    # Debug information about the log object
+    print(f"Log object type: {type(log)}")
+    print(f"Log object attributes: {dir(log)}")
+    print(f"Log object size: {len(log.to_json()) if hasattr(log, 'to_json') else 'N/A'} bytes")
     
-    
-    # Run experiment 
-    # models = ["google/gemini-1.5-flash", "google/gemini-1.5-pro", "gemini-2.5-pro-exp-03-25", "openai/gpt-4o-mini", "openai/gpt-4o"]
-    # for model in models:
-    #     print(f"Evaluating model {model}...")
-    #     try:
-    #         log = eval(nested_dirs_challenge(depth_n=10),
-    #             model=model,
-    #             epochs = 10,
-    #             metadata={
-    #                 "run_info": "Experiment with different models"})
-    #     except Exception as e:
-    #         print(f"Error evaluating model {model}: {e}")
-    #         import traceback
-    #         traceback.print_exc()
-
-
-    # this addressing of log object does not work, while it strictly follows the doc
-    # try:
-    #     if log.status == "success":
-    #         print(f"\nEvaluation results:\n{log.results}")
-    #         print(f"\nEvaluation error:\n{log.error}")
-    #     else:
-    #         print(f"\nEvaluation results:\n{log}")
-    # except Exception as e:
-    #     print(f"Error printing results: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+    try:
+        # Try to access some common attributes
+        if hasattr(log, 'runs'):
+            print(f"Number of runs: {len(log.runs)}")
+        if hasattr(log, 'metrics'):
+            print(f"Metrics: {log.metrics}")
+        if hasattr(log, 'summary'):
+            print(f"Summary available: {bool(log.summary)}")
+            
+        print("Completed evaluation")
+        
+        # Save log as JSON with error handling
+        from datetime import datetime
+        import os
+        import json
+        
+        # Create logs directory if it doesn't exist
+        os.makedirs("logs", exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = f"logs/directory_task_{timestamp}.json"
+        
+        # Try different methods to save the log
+        if hasattr(log, 'to_json'):
+            with open(log_path, "w") as f:
+                f.write(log.to_json())
+            print(f"Log saved to {log_path} using to_json() method")
+        elif hasattr(log, 'to_dict'):
+            with open(log_path, "w") as f:
+                json.dump(log.to_dict(), f, indent=2)
+            print(f"Log saved to {log_path} using to_dict() method")
+        else:
+            # Fallback to direct JSON serialization
+            try:
+                with open(log_path, "w") as f:
+                    json.dump(log.__dict__, f, indent=2)
+                print(f"Log saved to {log_path} using __dict__ attribute")
+            except (TypeError, AttributeError) as e:
+                print(f"Could not serialize log object: {e}")
+                # Last resort - save what we can
+                with open(f"logs/directory_task_debug_{timestamp}.txt", "w") as f:
+                    f.write(f"Log type: {type(log)}\n")
+                    f.write(f"Log dir: {dir(log)}\n")
+                    f.write(f"Log str: {str(log)}\n")
+                print(f"Saved debug info about log object")
+    except Exception as e:
+        print(f"Error while processing log object: {e}")
+        
+        
+    # Exp 2 - reasoning 
+    # model = "anthropic/claude-3-7-sonnet-20250219"
+    # reasoning_tokens = [1000, 2000, 4000, 8000] #tokens
+ 
+    # # Ensure the task definition uses sandbox="docker" if you want to test the py scorer reliably
+    # log = eval(nested_dirs_challenge(depth_n=10), # Using depth_n=2 for testing
+    #     model=model,
+    #     sandbox="docker", # Override sandbox setting if needed
+    #     epochs = 10,
+    #     reasoning_tokens=reasoning_tokens, # anthropic and gemini specific
+    #     # reasoning_effort="medium",  # openai and grok specific
+    #     # reasoning_summary="auto",   # openai specific
+        
+    # )
+    # print(f"Completed evaluation for model {model}")
