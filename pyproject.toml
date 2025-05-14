@@ -11,7 +11,7 @@ pandas = "^2.0.0"
 matplotlib = "^3.7.0"
 openpyxl = "^3.1.0"
 seaborn = "^0.12.0"
-inspect-ai = "^0.1.0"  # Replace with the correct version
+inspect-ai = "^0.3.58"
 
 [tool.poetry.dev-dependencies]
 pytest = "^7.3.1"

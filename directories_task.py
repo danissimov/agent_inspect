@@ -532,83 +532,90 @@ def nested_dirs_challenge(depth_n: int = 2) -> Task:
 
 
 if __name__ == "__main__":
-    models = ["openai/gpt-4o-mini", "openai/gpt-4o"] 
+    
+    # models = ["google/gemini-1.5-flash", "google/gemini-1.5-pro", "google/gemini-2.5-pro-exp-03-25", "anthropic/claude-3-5-haiku-20241022", "anthropic/claude-3-5-sonnet-20241022", "anthropic/claude-3-7-sonnet-20250219"] 
+    models = ["google/gemini-2.5-pro-exp-03-25"]
+    
+    # "openai/gpt-4o-mini", "openai/gpt-4o", 
     # "anthropic/claude-3-5-haiku-20241022", "anthropic/claude-3-5-sonnet-20241022", "anthropic/claude-3-7-sonnet-20250219", 
     # "google/gemini-1.5-flash", "google/gemini-1.5-pro", "google/gemini-2.5-pro-exp-03-25"
     # https://docs.google.com/document/d/1f_6-qGauLPUNLPC2K7tKv18vZ3J7jaNgOfSSW3zxPpI/edit?tab=t.0
     # Ensure the task definition uses sandbox="docker" if you want to test the py scorer reliably
-    log = eval(nested_dirs_challenge(depth_n=10), # Using depth_n=2 for testing
-        model=models,
-        sandbox="docker", # Override sandbox setting if needed
-        epochs = 1,
-        )
-    
-    # Debug information about the log object
-    print(f"Log object type: {type(log)}")
-    print(f"Log object attributes: {dir(log)}")
-    print(f"Log object size: {len(log.to_json()) if hasattr(log, 'to_json') else 'N/A'} bytes")
-    
-    try:
-        # Try to access some common attributes
-        if hasattr(log, 'runs'):
-            print(f"Number of runs: {len(log.runs)}")
-        if hasattr(log, 'metrics'):
-            print(f"Metrics: {log.metrics}")
-        if hasattr(log, 'summary'):
-            print(f"Summary available: {bool(log.summary)}")
+    for model in models:
+        log = eval(nested_dirs_challenge(depth_n=10), # Using depth_n=2 for testing
+            model=model,
+            sandbox="docker", # Override sandbox setting if needed
+            epochs = 10,
+            )
+        print(f"Completed evaluation for model {model}")
             
-        print("Completed evaluation")
-        
-        # Save log as JSON with error handling
-        from datetime import datetime
-        import os
-        import json
-        
-        # Create logs directory if it doesn't exist
-        os.makedirs("logs", exist_ok=True)
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = f"logs/directory_task_{timestamp}.json"
-        
-        # Try different methods to save the log
-        if hasattr(log, 'to_json'):
-            with open(log_path, "w") as f:
-                f.write(log.to_json())
-            print(f"Log saved to {log_path} using to_json() method")
-        elif hasattr(log, 'to_dict'):
-            with open(log_path, "w") as f:
-                json.dump(log.to_dict(), f, indent=2)
-            print(f"Log saved to {log_path} using to_dict() method")
-        else:
-            # Fallback to direct JSON serialization
-            try:
-                with open(log_path, "w") as f:
-                    json.dump(log.__dict__, f, indent=2)
-                print(f"Log saved to {log_path} using __dict__ attribute")
-            except (TypeError, AttributeError) as e:
-                print(f"Could not serialize log object: {e}")
-                # Last resort - save what we can
-                with open(f"logs/directory_task_debug_{timestamp}.txt", "w") as f:
-                    f.write(f"Log type: {type(log)}\n")
-                    f.write(f"Log dir: {dir(log)}\n")
-                    f.write(f"Log str: {str(log)}\n")
-                print(f"Saved debug info about log object")
-    except Exception as e:
-        print(f"Error while processing log object: {e}")
-        
-        
     # Exp 2 - reasoning 
-    # model = "anthropic/claude-3-7-sonnet-20250219"
-    # reasoning_tokens = [1000, 2000, 4000, 8000] #tokens
- 
+    # model = "anthropic/claude-3-7-sonnet-20250219"    
+
     # # Ensure the task definition uses sandbox="docker" if you want to test the py scorer reliably
     # log = eval(nested_dirs_challenge(depth_n=10), # Using depth_n=2 for testing
     #     model=model,
     #     sandbox="docker", # Override sandbox setting if needed
     #     epochs = 10,
-    #     reasoning_tokens=reasoning_tokens, # anthropic and gemini specific
+    #     reasoning_tokens=reasoning_tokens[0], # anthropic and gemini specific
     #     # reasoning_effort="medium",  # openai and grok specific
     #     # reasoning_summary="auto",   # openai specific
         
     # )
     # print(f"Completed evaluation for model {model}")
+    
+    
+    
+    # # Debug information about the log object
+    # print(f"Log object type: {type(log)}")
+    # print(f"Log object attributes: {dir(log)}")
+    # print(f"Log object size: {len(log.to_json()) if hasattr(log, 'to_json') else 'N/A'} bytes")
+    
+    # try:
+    #     # Try to access some common attributes
+    #     if hasattr(log, 'runs'):
+    #         print(f"Number of runs: {len(log.runs)}")
+    #     if hasattr(log, 'metrics'):
+    #         print(f"Metrics: {log.metrics}")
+    #     if hasattr(log, 'summary'):
+    #         print(f"Summary available: {bool(log.summary)}")
+            
+    #     print("Completed evaluation")
+        
+    #     # Save log as JSON with error handling
+    #     from datetime import datetime
+    #     import os
+    #     import json
+        
+    #     # Create logs directory if it doesn't exist
+    #     os.makedirs("logs", exist_ok=True)
+        
+    #     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #     log_path = f"logs/directory_task_{timestamp}.json"
+        
+    #     # Try different methods to save the log
+    #     if hasattr(log, 'to_json'):
+    #         with open(log_path, "w") as f:
+    #             f.write(log.to_json())
+    #         print(f"Log saved to {log_path} using to_json() method")
+    #     elif hasattr(log, 'to_dict'):
+    #         with open(log_path, "w") as f:
+    #             json.dump(log.to_dict(), f, indent=2)
+    #         print(f"Log saved to {log_path} using to_dict() method")
+    #     else:
+    #         # Fallback to direct JSON serialization
+    #         try:
+    #             with open(log_path, "w") as f:
+    #                 json.dump(log.__dict__, f, indent=2)
+    #             print(f"Log saved to {log_path} using __dict__ attribute")
+    #         except (TypeError, AttributeError) as e:
+    #             print(f"Could not serialize log object: {e}")
+    #             # Last resort - save what we can
+    #             with open(f"logs/directory_task_debug_{timestamp}.txt", "w") as f:
+    #                 f.write(f"Log type: {type(log)}\n")
+    #                 f.write(f"Log dir: {dir(log)}\n")
+    #                 f.write(f"Log str: {str(log)}\n")
+    #             print(f"Saved debug info about log object")
+    # except Exception as e:
+    #     print(f"Error while processing log object: {e}")
+    
